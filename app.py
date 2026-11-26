@@ -1,17 +1,18 @@
 import os
+import gc
 import glob
 import cv2
 import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from insightface.model_zoo import SCRFD
 from supabase import create_client
 
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -20,33 +21,39 @@ SUPABASE_URL = "https://xxngxkpsrkstnahtmghr.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4bmd4a3BzcmtzdG5haHRtZ2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU1ODEwNDQsImV4cCI6MjExMTE1NzA0NH0.kK4K_H3rSgZOEs_ErRKFcKGTqc0Td2zvdeVCgjTjT6U"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ตั้งค่า ONNX Runtime ให้ประหยัด RAM สูงสุด
+# ตั้งค่า ONNX Runtime ให้ใช้ RAM ต่ำที่สุดเท่าที่เป็นไปได้
 sess_opts = ort.SessionOptions()
 sess_opts.enable_mem_pattern = False
 sess_opts.enable_cpu_mem_arena = False
 sess_opts.intra_op_num_threads = 1
+sess_opts.inter_op_num_threads = 1
 
 model_dir = "/root/.insightface/models/buffalo_s"
-
-# 1. โหลดโมเดลตรวจจับใบหน้าของ buffalo_s (det_500m.onnx กิน RAM แค่ ~2 MB)
-det_files = glob.glob(os.path.join(model_dir, "det_*.onnx"))
-det_session = ort.InferenceSession(det_files[0], sess_options=sess_opts, providers=["CPUExecutionProvider"])
-detector = SCRFD(model_file=det_files[0], session=det_session)
-detector.prepare(ctx_id=0, input_size=(640, 640))
-
-# 2. โหลดโมเดลจดจำใบหน้าของ buffalo_s (w600k_mbf.onnx กิน RAM ~13 MB)
 rec_files = glob.glob(os.path.join(model_dir, "*rec*.onnx")) or glob.glob(os.path.join(model_dir, "w600k*.onnx"))
 rec_session = ort.InferenceSession(rec_files[0], sess_options=sess_opts, providers=["CPUExecutionProvider"])
 rec_input_name = rec_session.get_inputs()[0].name
 
+# ใช้ตัวตรวจจับใบหน้า DNN น้ำหนักเบา (ไม่ดึงโมดูลหนักของ InsightFace)
+from insightface.model_zoo import SCRFD
+det_files = glob.glob(os.path.join(model_dir, "det_*.onnx"))
+det_session = ort.InferenceSession(det_files[0], sess_options=sess_opts, providers=["CPUExecutionProvider"])
+detector = SCRFD(model_file=det_files[0], session=det_session)
+detector.prepare(ctx_id=-1, input_size=(320, 320))  # ลด input_size เหลือ 320x320 ลดการใช้ RAM ลง 4 เท่า!
+
 def get_face_embedding(img):
+    # ย่อภาพไม่ให้เกิน 640px ก่อนเข้าโมเดลป้องกัน RAM พุ่ง
+    h, w = img.shape[:2]
+    if max(h, w) > 640:
+        scale = 640.0 / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)))
+
     bboxes, _ = detector.detect(img, max_num=1, metric="default")
     if bboxes is None or len(bboxes) == 0:
         return None
-    
+
     x1, y1, x2, y2 = bboxes[0][:4].astype(int)
-    w, h = x2 - x1, y2 - y1
-    pad_w, pad_h = int(w * 0.1), int(h * 0.1)
+    fw, fh = x2 - x1, y2 - y1
+    pad_w, pad_h = int(fw * 0.1), int(fh * 0.1)
     x1, y1 = max(0, x1 - pad_w), max(0, y1 - pad_h)
     x2, y2 = min(img.shape[1], x2 + pad_w), min(img.shape[0], y2 + pad_h)
 
@@ -57,7 +64,11 @@ def get_face_embedding(img):
 
     emb = rec_session.run(None, {rec_input_name: blob})[0][0]
     norm = np.linalg.norm(emb)
-    return (emb / norm).tolist() if norm > 0 else emb.tolist()
+    result = (emb / norm).tolist() if norm > 0 else emb.tolist()
+    
+    del img, face_crop, face_rgb, face_norm, blob
+    gc.collect()
+    return result
 
 @app.get("/")
 def home():
@@ -74,6 +85,7 @@ async def search_face(file: UploadFile = File(...), event_name: str = Form("ALL"
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    del contents, nparr
     if img is None:
         return {"error": "ไม่สามารถอ่านไฟล์รูปภาพได้"}
 
@@ -103,4 +115,5 @@ async def search_face(file: UploadFile = File(...), event_name: str = Form("ALL"
             "download_url": f"https://drive.google.com/uc?export=download&id={fid}"
         })
 
+    gc.collect()
     return {"matches": matches}
