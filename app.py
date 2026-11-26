@@ -5,6 +5,7 @@ import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from insightface.model_zoo import SCRFD
 from supabase import create_client
 
 app = FastAPI()
@@ -19,33 +20,36 @@ SUPABASE_URL = "https://xxngxkpsrkstnahtmghr.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4bmd4a3BzcmtzdG5haHRtZ2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU1ODEwNDQsImV4cCI6MjExMTE1NzA0NH0.kK4K_H3rSgZOEs_ErRKFcKGTqc0Td2zvdeVCgjTjT6U"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ตั้งค่า ONNX Runtime ให้ประหยัด RAM สูงสุด (ไม่จองหน่วยความจำล่วงหน้า)
+# ตั้งค่า ONNX Runtime ให้ประหยัด RAM สูงสุด
 sess_opts = ort.SessionOptions()
 sess_opts.enable_mem_pattern = False
 sess_opts.enable_cpu_mem_arena = False
 sess_opts.intra_op_num_threads = 1
 
-# ค้นหาไฟล์โมเดลจดจำใบหน้าของ buffalo_s ที่โหลดไว้ตอน Build
 model_dir = "/root/.insightface/models/buffalo_s"
+
+# 1. โหลดโมเดลตรวจจับใบหน้าของ buffalo_s (det_500m.onnx กิน RAM แค่ ~2 MB)
+det_files = glob.glob(os.path.join(model_dir, "det_*.onnx"))
+det_session = ort.InferenceSession(det_files[0], sess_options=sess_opts, providers=["CPUExecutionProvider"])
+detector = SCRFD(model_file=det_files[0], session=det_session)
+detector.prepare(ctx_id=0, input_size=(640, 640))
+
+# 2. โหลดโมเดลจดจำใบหน้าของ buffalo_s (w600k_mbf.onnx กิน RAM ~13 MB)
 rec_files = glob.glob(os.path.join(model_dir, "*rec*.onnx")) or glob.glob(os.path.join(model_dir, "w600k*.onnx"))
 rec_session = ort.InferenceSession(rec_files[0], sess_options=sess_opts, providers=["CPUExecutionProvider"])
 rec_input_name = rec_session.get_inputs()[0].name
 
-# ใช้ OpenCV Haar Cascade ตรวจจับกรอบใบหน้า (กิน RAM แค่ ~2 MB)
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-
 def get_face_embedding(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
-    if len(faces) == 0:
+    bboxes, _ = detector.detect(img, max_num=1, metric="default")
+    if bboxes is None or len(bboxes) == 0:
         return None
-    # เลือกใบหน้าที่ใหญ่ที่สุดในภาพ
-    x, y, w, h = max(faces, key=lambda b: b[2] * b[3])
-    # ขยายขอบเล็กน้อยให้ครอบคลุมโครงหน้าเหมือน InsightFace
-    pad_w, pad_h = int(w * 0.15), int(h * 0.15)
-    x1, y1 = max(0, x - pad_w), max(0, y - pad_h)
-    x2, y2 = min(img.shape[1], x + w + pad_w), min(img.shape[0], y + h + pad_h)
     
+    x1, y1, x2, y2 = bboxes[0][:4].astype(int)
+    w, h = x2 - x1, y2 - y1
+    pad_w, pad_h = int(w * 0.1), int(h * 0.1)
+    x1, y1 = max(0, x1 - pad_w), max(0, y1 - pad_h)
+    x2, y2 = min(img.shape[1], x2 + pad_w), min(img.shape[0], y2 + pad_h)
+
     face_crop = cv2.resize(img[y1:y2, x1:x2], (112, 112))
     face_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB).astype(np.float32)
     face_norm = (face_rgb - 127.5) / 127.5
