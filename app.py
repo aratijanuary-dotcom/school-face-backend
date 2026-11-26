@@ -1,3 +1,4 @@
+import os
 import cv2
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form
@@ -17,7 +18,12 @@ SUPABASE_URL = "https://xxngxkpsrkstnahtmghr.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4bmd4a3BzcmtzdG5haHRtZ2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU1ODEwNDQsImV4cCI6MjExMTE1NzA0NH0.kK4K_H3rSgZOEs_ErRKFcKGTqc0Td2zvdeVCgjTjT6U"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-face_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+# ใช้รุ่น buffalo_s เพื่อประหยัด RAM บน Render Free (512MB) และโหลดเฉพาะโมเดลตรวจจับ+จดจำใบหน้า
+face_app = FaceAnalysis(
+    name="buffalo_s",
+    allowed_modules=["detection", "recognition"],
+    providers=["CPUExecutionProvider"]
+)
 face_app.prepare(ctx_id=0, det_size=(640, 640))
 
 @app.get("/")
