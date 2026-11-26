@@ -23,13 +23,13 @@ SUPABASE_URL = "https://xxngxkpsrkstnahtmghr.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4bmd4a3BzcmtzdG5haHRtZ2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU1ODEwNDQsImV4cCI6MjExMTE1NzA0NH0.kK4K_H3rSgZOEs_ErRKFcKGTqc0Td2zvdeVCgjTjT6U"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# ตั้งค่า ONNX Runtime ให้ใช้ RAM ต่ำที่สุด
 sess_opts = ort.SessionOptions()
 sess_opts.enable_mem_pattern = False
 sess_opts.enable_cpu_mem_arena = False
 sess_opts.intra_op_num_threads = 1
 sess_opts.inter_op_num_threads = 1
 
-# ชี้ไปที่โมเดล buffalo_l ให้ตรงกับฐานข้อมูลใน Supabase 100%
 model_dir = "/root/.insightface/models/buffalo_l"
 rec_files = glob.glob(os.path.join(model_dir, "w600k*.onnx"))
 rec_session = ort.InferenceSession(rec_files[0], sess_options=sess_opts, providers=["CPUExecutionProvider"])
