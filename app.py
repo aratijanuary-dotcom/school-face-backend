@@ -6,6 +6,8 @@ import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from insightface.model_zoo import SCRFD
+from insightface.utils import face_align
 from supabase import create_client
 
 app = FastAPI()
@@ -21,7 +23,6 @@ SUPABASE_URL = "https://xxngxkpsrkstnahtmghr.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4bmd4a3BzcmtzdG5haHRtZ2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU1ODEwNDQsImV4cCI6MjExMTE1NzA0NH0.kK4K_H3rSgZOEs_ErRKFcKGTqc0Td2zvdeVCgjTjT6U"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ตั้งค่า ONNX Runtime ให้ใช้ RAM ต่ำที่สุดเท่าที่เป็นไปได้
 sess_opts = ort.SessionOptions()
 sess_opts.enable_mem_pattern = False
 sess_opts.enable_cpu_mem_arena = False
@@ -33,31 +34,29 @@ rec_files = glob.glob(os.path.join(model_dir, "*rec*.onnx")) or glob.glob(os.pat
 rec_session = ort.InferenceSession(rec_files[0], sess_options=sess_opts, providers=["CPUExecutionProvider"])
 rec_input_name = rec_session.get_inputs()[0].name
 
-# ใช้ตัวตรวจจับใบหน้า DNN น้ำหนักเบา (ไม่ดึงโมดูลหนักของ InsightFace)
-from insightface.model_zoo import SCRFD
 det_files = glob.glob(os.path.join(model_dir, "det_*.onnx"))
 det_session = ort.InferenceSession(det_files[0], sess_options=sess_opts, providers=["CPUExecutionProvider"])
 detector = SCRFD(model_file=det_files[0], session=det_session)
-detector.prepare(ctx_id=-1, input_size=(320, 320))  # ลด input_size เหลือ 320x320 ลดการใช้ RAM ลง 4 เท่า!
+detector.prepare(ctx_id=-1, input_size=(320, 320))
 
 def get_face_embedding(img):
-    # ย่อภาพไม่ให้เกิน 640px ก่อนเข้าโมเดลป้องกัน RAM พุ่ง
     h, w = img.shape[:2]
     if max(h, w) > 640:
         scale = 640.0 / max(h, w)
         img = cv2.resize(img, (int(w * scale), int(h * scale)))
 
-    bboxes, _ = detector.detect(img, max_num=1, metric="default")
+    # ดึงทั้งกรอบใบหน้า (bboxes) และจุดสำคัญ 5 จุดบนใบหน้า (kps)
+    bboxes, kpss = detector.detect(img, max_num=1, metric="default")
     if bboxes is None or len(bboxes) == 0:
         return None
 
-    x1, y1, x2, y2 = bboxes[0][:4].astype(int)
-    fw, fh = x2 - x1, y2 - y1
-    pad_w, pad_h = int(fw * 0.1), int(fh * 0.1)
-    x1, y1 = max(0, x1 - pad_w), max(0, y1 - pad_h)
-    x2, y2 = min(img.shape[1], x2 + pad_w), min(img.shape[0], y2 + pad_h)
+    # ใช้ face_align.norm_crop หมุนและจัดแนวใบหน้าให้ตรงตามมาตรฐาน InsightFace
+    if kpss is not None and len(kpss) > 0:
+        face_crop = face_align.norm_crop(img, landmark=kpss[0], image_size=112)
+    else:
+        x1, y1, x2, y2 = bboxes[0][:4].astype(int)
+        face_crop = cv2.resize(img[max(0, y1):min(img.shape[0], y2), max(0, x1):min(img.shape[1], x2)], (112, 112))
 
-    face_crop = cv2.resize(img[y1:y2, x1:x2], (112, 112))
     face_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB).astype(np.float32)
     face_norm = (face_rgb - 127.5) / 127.5
     blob = np.transpose(face_norm, (2, 0, 1))[np.newaxis, ...]
@@ -93,9 +92,10 @@ async def search_face(file: UploadFile = File(...), event_name: str = Form("ALL"
     if query_emb is None:
         return {"error": "ไม่พบใบหน้าในรูปที่คุณอัปโหลด กรุณาใช้รูปหน้าตรงที่ชัดเจน"}
 
+    # ลด threshold เป็น 0.25 เพื่อรองรับการเทียบข้ามรุ่นระหว่าง buffalo_s กับ buffalo_l
     res = supabase.rpc("match_faces", {
         "query_embedding": query_emb,
-        "match_threshold": 0.40,
+        "match_threshold": 0.25,
         "match_count": 100,
         "filter_event": event_name
     }).execute()
@@ -104,7 +104,7 @@ async def search_face(file: UploadFile = File(...), event_name: str = Form("ALL"
     seen_files = set()
     for row in (res.data or []):
         fid = row["drive_file_id"]
-        if fid in seen_files or "." in fid:
+        if fid in seen_files:
             continue
         seen_files.add(fid)
         matches.append({
