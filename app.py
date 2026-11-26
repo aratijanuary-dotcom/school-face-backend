@@ -23,7 +23,6 @@ SUPABASE_URL = "https://xxngxkpsrkstnahtmghr.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4bmd4a3BzcmtzdG5haHRtZ2hyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU1ODEwNDQsImV4cCI6MjExMTE1NzA0NH0.kK4K_H3rSgZOEs_ErRKFcKGTqc0Td2zvdeVCgjTjT6U"
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ตั้งค่า ONNX Runtime ให้ใช้ RAM ต่ำที่สุด
 sess_opts = ort.SessionOptions()
 sess_opts.enable_mem_pattern = False
 sess_opts.enable_cpu_mem_arena = False
@@ -109,7 +108,7 @@ async def search_face(file: UploadFile = File(...), event_name: str = Form("ALL"
             "file_id": fid,
             "event_name": row["event_name"],
             "similarity": round(row["similarity"] * 100, 1),
-            "thumb_url": f"https://drive.google.com/thumbnail?id={fid}&sz=w600",
+            "thumb_url": f"https://lh3.googleusercontent.com/d/{fid}=w600",
             "download_url": f"https://drive.google.com/uc?export=download&id={fid}"
         })
 
