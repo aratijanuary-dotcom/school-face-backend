@@ -71,14 +71,8 @@ def get_face_embedding(img):
 def home():
     return {"status": "AVERB AI Face API (buffalo_l) is running!"}
 
-@app.get("/events")
-def get_events():
-    res = supabase.rpc("get_events").execute()
-    events = [row["event_name"] for row in res.data] if res.data else []
-    return {"events": events}
-
 @app.post("/search")
-async def search_face(file: UploadFile = File(...), event_name: str = Form("ALL")):
+async def search_face(file: UploadFile = File(...), event_name: str = Form(...)):
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -111,6 +105,15 @@ async def search_face(file: UploadFile = File(...), event_name: str = Form("ALL"
             "thumb_url": f"https://lh3.googleusercontent.com/d/{fid}=w600",
             "download_url": f"https://drive.google.com/uc?export=download&id={fid}"
         })
+
+    # บันทึกสถิติการค้นหาลงฐานข้อมูล
+    try:
+        supabase.table("search_logs").insert({
+            "event_name": event_name,
+            "matches_count": len(matches)
+        }).execute()
+    except Exception:
+        pass
 
     gc.collect()
     return {"matches": matches}
